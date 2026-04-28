@@ -351,9 +351,12 @@
         const openBadge = r.isOpenWeights ? '<span class="badge" style="background:#1a3f5f;color:#7fb8e6">open</span>' : '';
         return `<tr>
           <td class="rank">${i + 1}</td>
-          <td>${r.openrouterApiId
-              ? `<a href="https://openrouter.ai/${escape(r.openrouterApiId)}" target="_blank" rel="noreferrer">${escape(r.name)}</a>`
-              : escape(r.name)}${freeBadge}${orBadge}${openBadge}</td>
+          <td>${(() => {
+            if (!r.openrouterApiId) return escape(r.name);
+            const bare = r.openrouterApiId.replace(/:free$/, '');
+            const href = 'https://openrouter.ai/' + (r.isFreeOnOpenRouter ? bare + ':free' : bare);
+            return `<a href="${escape(href)}" target="_blank" rel="noreferrer">${escape(r.name)}</a>`;
+          })()}${freeBadge}${orBadge}${openBadge}</td>
           <td>${fmt.text(r.freeExpiration)}</td>
           <td>${fmt.policy(r.policy)}</td>
           <td>${fmt.text(r.creator)}</td>
