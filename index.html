@@ -268,6 +268,7 @@
             if (modelLow.includes(slugLow) || slugLow.includes(modelLow)) {
               r.isFreeOnOpenRouter = true;
               r.freeExpiration = m.expiration_date ?? null;
+              if (!r.openrouterApiId) r.openrouterApiId = bare;
               r.policy =
                 policyByOrId.get(m.id) ??
                 policyByOrId.get(m.id.replace(/:free$/, '')) ??
@@ -350,7 +351,9 @@
         const openBadge = r.isOpenWeights ? '<span class="badge" style="background:#1a3f5f;color:#7fb8e6">open</span>' : '';
         return `<tr>
           <td class="rank">${i + 1}</td>
-          <td>${escape(r.name)}${freeBadge}${orBadge}${openBadge}</td>
+          <td>${r.openrouterApiId
+              ? `<a href="https://openrouter.ai/${escape(r.openrouterApiId)}" target="_blank" rel="noreferrer">${escape(r.name)}</a>`
+              : escape(r.name)}${freeBadge}${orBadge}${openBadge}</td>
           <td>${fmt.text(r.freeExpiration)}</td>
           <td>${fmt.policy(r.policy)}</td>
           <td>${fmt.text(r.creator)}</td>
