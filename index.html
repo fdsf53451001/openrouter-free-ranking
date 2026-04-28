@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>Artificial Analysis — Model Leaderboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 24px; background: #0b0d10; color: #e6e8eb; }
+  h1 { margin: 0 0 4px; font-size: 20px; }
+  .sub { color: #8a9099; margin-bottom: 16px; font-size: 13px; }
+  .controls { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .controls input[type=search] { flex: 1; min-width: 220px; padding: 8px 10px; border-radius: 6px; border: 1px solid #2a2f36; background: #14171c; color: inherit; }
+  .controls label { display: flex; gap: 6px; align-items: center; color: #c8ccd2; user-select: none; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 8px 10px; border-bottom: 1px solid #1d2126; text-align: left; white-space: nowrap; }
+  th { position: sticky; top: 0; background: #14171c; cursor: pointer; user-select: none; font-weight: 600; color: #c8ccd2; }
+  th.sort-asc::after  { content: " ▲"; color: #6aa3ff; }
+  th.sort-desc::after { content: " ▼"; color: #6aa3ff; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:hover td { background: #14181d; }
+  .rank { color: #8a9099; width: 44px; }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px; background: #1a4f2e; color: #7fe0a4; margin-left: 6px; }
+  .pill { font-size: 11px; color: #8a9099; }
+  .muted { color: #595f69; }
+  a { color: #6aa3ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  footer { margin-top: 16px; color: #595f69; font-size: 12px; }
+  #status { padding: 12px; border-radius: 6px; background: #14171c; border: 1px solid #2a2f36; margin-bottom: 12px; color: #c8ccd2; }
+  #status.error { background: #3a1818; border-color: #5a2222; color: #f0a8a8; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #6aa3ff; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <h1>Artificial Analysis — Model Leaderboard</h1>
+  <div class="sub">
+    依 Intelligence Index 排序。資料即時抓取自
+    <a href="https://artificialanalysis.ai/leaderboards/models" target="_blank" rel="noreferrer">artificialanalysis.ai</a>
+    與
+    <a href="https://openrouter.ai/api/v1/models" target="_blank" rel="noreferrer">openrouter.ai</a>。
+  </div>
+
+  <div id="status"><span class="spinner"></span><span id="statusText">載入中…</span></div>
+
+  <div class="controls" hidden id="controls">
+    <input id="q" type="search" placeholder="搜尋名稱 / 廠商 / slug…" autocomplete="off">
+    <label><input id="onlyFree" type="checkbox" checked> <strong>僅顯示 OpenRouter 免費</strong></label>
+    <label><input id="onlyOR" type="checkbox"> 僅顯示 OpenRouter 可用</label>
+    <label><input id="onlyOpen" type="checkbox"> 僅顯示 Open Weights</label>
+    <span class="pill" id="count"></span>
+  </div>
+
+  <table hidden id="table">
+    <thead>
+      <tr>
+        <th class="rank">#</th>
+        <th data-key="name">Model</th>
+        <th data-key="freeExpiration" title="OpenRouter 上 :free 變體的計畫下架日">Free until</th>
+        <th data-key="trainsRank" title="供應商 / OpenRouter 是否會用你的 prompt 做訓練">Trains?</th>
+        <th data-key="creator">Creator</th>
+        <th data-key="intelligenceIndex" class="num sort-desc">II</th>
+        <th data-key="codingIndex" class="num">Coding</th>
+        <th data-key="agenticIndex" class="num">Agentic</th>
+        <th data-key="medianOutputTokensPerSecond" class="num">tok/s</th>
+        <th data-key="medianTimeToFirstTokenSeconds" class="num">TTFT (s)</th>
+        <th data-key="blendedUsdPer1M" class="num">$ / 1M</th>
+        <th data-key="contextWindow" class="num">Context</th>
+        <th data-key="releaseDate">Released</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <footer>Loaded: <span id="built"></span></footer>
+
+  <script>
+    // ----- helpers -----
+    const $ = id => document.getElementById(id);
+    const setStatus = (msg, isError = false) => {
+      const el = $('status');
+      el.classList.toggle('error', isError);
+      el.innerHTML = isError
+        ? `❌ ${msg}`
+        : `<span class="spinner"></span><span>${msg}</span>`;
+    };
+    const hideStatus = () => $('status').hidden = true;
+
+    // ----- AA HTML -> rows (mirrors fetch-aa-leaderboard.js) -----
+    function matchBrace(s, start) {
+      let depth = 0, inStr = false, esc = false;
+      for (let i = start; i < s.length; i++) {
+        const c = s[i];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (c === '\\') esc = true;
+          else if (c === '"') inStr = false;
+          continue;
+        }
+        if (c === '"') inStr = true;
+        else if (c === '{') depth++;
+        else if (c === '}') { depth--; if (depth === 0) return i; }
+      }
+      return -1;
+    }
+
+    function parseAA(html) {
+      const pushRe = /self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)/g;
+      const chunks = [];
+      for (const m of html.matchAll(pushRe)) chunks.push(m[1]);
+      if (!chunks.length) throw new Error('找不到 RSC chunks');
+      const raw = chunks.join('');
+      const unescaped = JSON.parse('"' + raw.replace(/\\\$/g, '$') + '"');
+
+      const models = [];
+      const seen = new Set();
+      for (let i = 0; i < unescaped.length; i++) {
+        if (unescaped[i] !== '{') continue;
+        const end = matchBrace(unescaped, i);
+        if (end < 0) continue;
+        const slice = unescaped.slice(i, end + 1);
+        if (!slice.includes('"intelligenceIndex"')) continue;
+        try {
+          const obj = JSON.parse(slice);
+          if (obj && obj.name && obj.slug && typeof obj.intelligenceIndex !== 'undefined') {
+            const key = `${obj.slug}|${obj.model_creator?.slug ?? ''}`;
+            if (!seen.has(key)) { seen.add(key); models.push(obj); }
+          }
+        } catch {}
+      }
+
+      const clean = v => (v === '$undefined' ? null : v);
+      return models.map(raw => {
+        const m = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, clean(v)]));
+        return {
+          name: m.name,
+          slug: m.slug,
+          creator: m.modelCreatorName ?? m.modelCreatorSlug ?? null,
+          intelligenceIndex: m.intelligenceIndex,
+          codingIndex: m.codingIndex ?? null,
+          agenticIndex: m.agenticIndex ?? null,
+          medianOutputTokensPerSecond: m.medianOutputTokensPerSecond ?? null,
+          medianTimeToFirstTokenSeconds: m.medianTimeToFirstTokenSeconds ?? null,
+          blendedUsdPer1M: m.price1mBlended3To1 ?? null,
+          inputUsdPer1M: m.price1mInputTokens ?? null,
+          outputUsdPer1M: m.price1mOutputTokens ?? null,
+          contextWindow: m.contextWindowTokens ?? null,
+          releaseDate: m.releaseDate ?? null,
+          openrouterApiId: m.openrouterApiId ?? null,
+          isOpenWeights: m.isOpenWeights ?? null,
+        };
+      });
+    }
+
+    // ----- main -----
+    let rows = [];
+
+    // codetabs proxy is the only public CORS proxy currently passing
+    // requests to openrouter.ai's frontend API without auth/rate limit pain.
+    // If it dies, the Trains? column degrades to "—" but the rest still works.
+    const FRONTEND_PROXY =
+      'https://api.codetabs.com/v1/proxy?quest=' +
+      encodeURIComponent('https://openrouter.ai/api/frontend/models');
+
+    let policyWarning = null;
+
+    async function load() {
+      try {
+        setStatus('抓取資料中（AA ~3MB + OpenRouter ~7MB）…');
+        const [aaHtml, orData, frontendData] = await Promise.all([
+          fetch('https://artificialanalysis.ai/leaderboards/models').then(r => {
+            if (!r.ok) throw new Error(`AA HTTP ${r.status}`);
+            return r.text();
+          }),
+          fetch('https://openrouter.ai/api/v1/models').then(r => {
+            if (!r.ok) throw new Error(`OR HTTP ${r.status}`);
+            return r.json();
+          }),
+          fetch(FRONTEND_PROXY).then(r => {
+            if (!r.ok) throw new Error(`proxy HTTP ${r.status}`);
+            return r.json();
+          }).catch(e => {
+            policyWarning = e.message;
+            return null;
+          }),
+        ]);
+
+        setStatus('解析資料中…');
+        await new Promise(r => setTimeout(r, 0)); // yield to paint
+
+        rows = parseAA(aaHtml);
+        const free = orData.data.filter(m => m.pricing?.prompt === '0' && m.pricing?.completion === '0');
+
+        // Build lookup: any OR id (with or without :free) → expiration_date.
+        const expByOrId = new Map();
+        for (const m of free) {
+          expByOrId.set(m.id, m.expiration_date ?? null);
+          expByOrId.set(m.id.replace(/:free$/, ''), m.expiration_date ?? null);
+        }
+
+        // Build lookup: OR id → data_policy (from frontend API).
+        // null = unknown (proxy down). Object = { trainsProvider, trainsOR }.
+        const policyByOrId = new Map();
+        if (frontendData) {
+          const arr = Array.isArray(frontendData) ? frontendData : (frontendData.data || []);
+          for (const fm of arr) {
+            const ep = fm.endpoint;
+            const pol = ep?.data_policy;
+            if (!pol) continue;
+            const id = ep.model_variant_slug || fm.slug;
+            if (!id) continue;
+            const entry = {
+              trainsProvider: pol.training === true,
+              trainsOR: pol.trainingOpenRouter === true,
+            };
+            policyByOrId.set(id, entry);
+            policyByOrId.set(id.replace(/:free$/, ''), entry);
+          }
+        }
+
+        // Pass 1: exact match via AA's openrouterApiId field.
+        const freeIds = new Set(free.flatMap(m => [m.id, m.id.replace(/:free$/, '')]));
+        for (const r of rows) {
+          r.isFreeOnOpenRouter =
+            !!r.openrouterApiId &&
+            (freeIds.has(r.openrouterApiId) || freeIds.has(r.openrouterApiId + ':free'));
+          if (r.isFreeOnOpenRouter) {
+            r.freeExpiration =
+              expByOrId.get(r.openrouterApiId) ??
+              expByOrId.get(r.openrouterApiId + ':free') ??
+              null;
+            r.policy =
+              policyByOrId.get(r.openrouterApiId + ':free') ??
+              policyByOrId.get(r.openrouterApiId) ??
+              null;
+          } else {
+            r.freeExpiration = null;
+            r.policy = null;
+          }
+          r.trainsRank = r.policy
+            ? (r.policy.trainsProvider || r.policy.trainsOR ? 1 : 0)
+            : -1;
+        }
+
+        // Pass 2: fallback for OR free models that AA didn't link.
+        // Match by creator + slug substring (e.g. AA "hy3" / Tencent ↔ OR "tencent/hy3-preview:free").
+        const claimedOrIds = new Set();
+        for (const r of rows) {
+          if (r.isFreeOnOpenRouter && r.openrouterApiId) {
+            claimedOrIds.add(r.openrouterApiId);
+            claimedOrIds.add(r.openrouterApiId + ':free');
+          }
+        }
+        for (const m of free) {
+          if (claimedOrIds.has(m.id)) continue;
+          const bare = m.id.replace(/:free$/, '');
+          const slash = bare.indexOf('/');
+          if (slash < 0) continue;
+          const provLow = bare.slice(0, slash).toLowerCase();
+          const modelLow = bare.slice(slash + 1).toLowerCase();
+          for (const r of rows) {
+            if (r.isFreeOnOpenRouter) continue;
+            const cre = (r.creator || '').toLowerCase().replace(/\s+/g, '');
+            if (!cre || (!cre.includes(provLow) && !provLow.includes(cre))) continue;
+            const slugLow = (r.slug || '').toLowerCase();
+            if (!slugLow) continue;
+            if (modelLow.includes(slugLow) || slugLow.includes(modelLow)) {
+              r.isFreeOnOpenRouter = true;
+              r.freeExpiration = m.expiration_date ?? null;
+              r.policy =
+                policyByOrId.get(m.id) ??
+                policyByOrId.get(m.id.replace(/:free$/, '')) ??
+                null;
+              r.trainsRank = r.policy
+                ? (r.policy.trainsProvider || r.policy.trainsOR ? 1 : 0)
+                : -1;
+              break;
+            }
+          }
+        }
+
+        rows.sort((a, b) => (b.intelligenceIndex ?? -1) - (a.intelligenceIndex ?? -1));
+
+        $('built').textContent = new Date().toLocaleString();
+        if (policyWarning) {
+          $('built').insertAdjacentHTML(
+            'afterend',
+            ` · <span style="color:#d8a93a">⚠ Trains? 欄資料載入失敗（${escape(policyWarning)}）</span>`
+          );
+        }
+        hideStatus();
+        $('controls').hidden = false;
+        $('table').hidden = false;
+        render();
+      } catch (e) {
+        setStatus(`載入失敗：${e.message}`, true);
+        console.error(e);
+      }
+    }
+
+    const fmt = {
+      num: (v, d = 2) => v == null ? '<span class="muted">—</span>' : Number(v).toFixed(d),
+      int: v => v == null ? '<span class="muted">—</span>' : Number(v).toLocaleString(),
+      money: v => v == null ? '<span class="muted">—</span>' : '$' + Number(v).toFixed(2),
+      text: v => v == null || v === '' ? '<span class="muted">—</span>' : String(v),
+      policy: p => {
+        if (!p) return '<span class="muted">—</span>';
+        const trains = p.trainsProvider || p.trainsOR;
+        const why = [
+          p.trainsProvider ? 'provider trains on prompts' : null,
+          p.trainsOR ? 'OpenRouter trains on prompts' : null,
+        ].filter(Boolean).join('; ') || 'neither provider nor OpenRouter trains';
+        return trains
+          ? `<span class="badge" style="background:#5a1f1f;color:#f0a8a8" title="${why}">trains</span>`
+          : `<span class="badge" style="background:#1a4f2e;color:#7fe0a4" title="${why}">no train</span>`;
+      },
+    };
+
+    let sortKey = 'intelligenceIndex';
+    let sortDir = 'desc';
+
+    function render() {
+      const q = $('q').value.trim().toLowerCase();
+      const onlyFree = $('onlyFree').checked;
+      const onlyOR = $('onlyOR').checked;
+      const onlyOpen = $('onlyOpen').checked;
+
+      let filtered = rows.filter(r => {
+        if (onlyFree && !r.isFreeOnOpenRouter) return false;
+        if (onlyOR && !r.openrouterApiId) return false;
+        if (onlyOpen && !r.isOpenWeights) return false;
+        if (!q) return true;
+        return (r.name + ' ' + (r.creator || '') + ' ' + r.slug).toLowerCase().includes(q);
+      });
+
+      filtered.sort((a, b) => {
+        const av = a[sortKey], bv = b[sortKey];
+        if (av == null && bv == null) return 0;
+        if (av == null) return 1;
+        if (bv == null) return -1;
+        if (typeof av === 'number' && typeof bv === 'number') return sortDir === 'asc' ? av - bv : bv - av;
+        const cmp = String(av).localeCompare(String(bv));
+        return sortDir === 'asc' ? cmp : -cmp;
+      });
+
+      $('tbody').innerHTML = filtered.map((r, i) => {
+        const freeBadge = r.isFreeOnOpenRouter ? '<span class="badge" style="background:#3f2d0a;color:#f0c674" title="Free on OpenRouter">free</span>' : '';
+        const orBadge = r.openrouterApiId && !r.isFreeOnOpenRouter ? '<span class="badge">OR</span>' : '';
+        const openBadge = r.isOpenWeights ? '<span class="badge" style="background:#1a3f5f;color:#7fb8e6">open</span>' : '';
+        return `<tr>
+          <td class="rank">${i + 1}</td>
+          <td>${escape(r.name)}${freeBadge}${orBadge}${openBadge}</td>
+          <td>${fmt.text(r.freeExpiration)}</td>
+          <td>${fmt.policy(r.policy)}</td>
+          <td>${fmt.text(r.creator)}</td>
+          <td class="num">${fmt.num(r.intelligenceIndex, 2)}</td>
+          <td class="num">${fmt.num(r.codingIndex, 2)}</td>
+          <td class="num">${fmt.num(r.agenticIndex, 2)}</td>
+          <td class="num">${fmt.num(r.medianOutputTokensPerSecond, 1)}</td>
+          <td class="num">${fmt.num(r.medianTimeToFirstTokenSeconds, 2)}</td>
+          <td class="num">${fmt.money(r.blendedUsdPer1M)}</td>
+          <td class="num">${fmt.int(r.contextWindow)}</td>
+          <td>${fmt.text(r.releaseDate)}</td>
+        </tr>`;
+      }).join('');
+
+      $('count').textContent = `顯示 ${filtered.length} / ${rows.length}`;
+    }
+
+    function escape(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    }
+
+    document.querySelectorAll('th[data-key]').forEach(th => {
+      th.addEventListener('click', () => {
+        const key = th.dataset.key;
+        if (sortKey === key) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+        else {
+          sortKey = key;
+          sortDir = ['name','creator','releaseDate'].includes(key) ? 'asc' : 'desc';
+        }
+        document.querySelectorAll('th').forEach(t => t.classList.remove('sort-asc','sort-desc'));
+        th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+        render();
+      });
+    });
+
+    ['q','onlyFree','onlyOR','onlyOpen'].forEach(id => {
+      $(id).addEventListener('input', render);
+      $(id).addEventListener('change', render);
+    });
+
+    load();
+  </script>
+</body>
+</html>
