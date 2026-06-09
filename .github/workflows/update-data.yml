@@ -1,0 +1,34 @@
+name: Update Model Data
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # every 6 hours
+  workflow_dispatch:          # manual trigger from GitHub UI
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/fetch_data.py'
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch model data
+        run: python scripts/fetch_data.py
+
+      - name: Commit updated data
+        run: |
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/
+          git diff --staged --quiet && echo "No changes" || \
+            git commit -m "chore: update model data [skip ci]" && git push

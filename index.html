@@ -29,7 +29,6 @@
   footer { margin-top: 16px; color: #595f69; font-size: 12px; }
   #status { padding: 12px; border-radius: 6px; background: #14171c; border: 1px solid #2a2f36; margin-bottom: 12px; color: #c8ccd2; }
   #status.error { background: #3a1818; border-color: #5a2222; color: #f0a8a8; }
-  #server-notice { padding: 10px 14px; border-radius: 6px; background: #1c1e10; border: 1px solid #4a4a1a; margin-bottom: 12px; color: #d8c840; font-size: 13px; }
   .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #6aa3ff; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -2px; margin-right: 6px; }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
@@ -37,15 +36,11 @@
 <body>
   <h1>Artificial Analysis — Model Leaderboard</h1>
   <div class="sub">
-    依 Intelligence Index 排序。資料即時抓取自
+    依 Intelligence Index 排序。AA 與 NVIDIA 資料每 6 小時由 GitHub Actions 自動更新，
+    OpenRouter 免費狀態即時抓取。資料來源：
     <a href="https://artificialanalysis.ai/leaderboards/models" target="_blank" rel="noreferrer">artificialanalysis.ai</a>、
-    <a href="https://openrouter.ai/api/v1/models" target="_blank" rel="noreferrer">openrouter.ai</a>
-    與
+    <a href="https://openrouter.ai/api/v1/models" target="_blank" rel="noreferrer">openrouter.ai</a>、
     <a href="https://build.nvidia.com/models" target="_blank" rel="noreferrer">build.nvidia.com</a>。
-  </div>
-
-  <div id="server-notice" hidden>
-    ⚠ 請先啟動本地代理伺服器：<code>python3 server.py</code>，再開啟 <a href="http://localhost:8080">http://localhost:8080</a>
   </div>
 
   <div id="status"><span class="spinner"></span><span id="statusText">載入中…</span></div>
@@ -81,10 +76,9 @@
     <tbody id="tbody"></tbody>
   </table>
 
-  <footer>Loaded: <span id="built"></span></footer>
+  <footer>資料更新：<span id="built"></span></footer>
 
   <script>
-    // ----- helpers -----
     const $ = id => document.getElementById(id);
     const setStatus = (msg, isError = false) => {
       const el = $('status');
@@ -95,189 +89,47 @@
     };
     const hideStatus = () => $('status').hidden = true;
 
-    // Detect file:// origin and show notice
-    const IS_FILE = location.protocol === 'file:';
-    if (IS_FILE) $('server-notice').hidden = false;
-
-    // Use local proxy when served via http://localhost:*, else fall back to direct or codetabs
-    const BASE = IS_FILE ? null : '';
-    const proxyUrl = path => IS_FILE ? null : (BASE + path);
-
-    // ----- AA HTML -> rows -----
-    function matchBrace(s, start) {
-      let depth = 0, inStr = false, esc = false;
-      for (let i = start; i < s.length; i++) {
-        const c = s[i];
-        if (inStr) {
-          if (esc) esc = false;
-          else if (c === '\\') esc = true;
-          else if (c === '"') inStr = false;
-          continue;
-        }
-        if (c === '"') inStr = true;
-        else if (c === '{') depth++;
-        else if (c === '}') { depth--; if (depth === 0) return i; }
-      }
-      return -1;
-    }
-
-    function parseAA(html) {
-      const pushRe = /self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)/g;
-      const chunks = [];
-      for (const m of html.matchAll(pushRe)) chunks.push(m[1]);
-      if (!chunks.length) throw new Error('找不到 RSC chunks');
-      const raw = chunks.join('');
-      const unescaped = JSON.parse('"' + raw.replace(/\\\$/g, '$') + '"');
-
-      const models = [];
-      const seen = new Set();
-      for (let i = 0; i < unescaped.length; i++) {
-        if (unescaped[i] !== '{') continue;
-        const end = matchBrace(unescaped, i);
-        if (end < 0) continue;
-        const slice = unescaped.slice(i, end + 1);
-        if (!slice.includes('"intelligenceIndex"')) continue;
-        try {
-          const obj = JSON.parse(slice);
-          if (obj && obj.name && obj.slug && typeof obj.intelligenceIndex !== 'undefined') {
-            const key = `${obj.slug}|${obj.model_creator?.slug ?? ''}`;
-            if (!seen.has(key)) { seen.add(key); models.push(obj); }
-          }
-        } catch {}
-      }
-
-      const clean = v => (v === '$undefined' ? null : v);
-      return models.map(raw => {
-        const m = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, clean(v)]));
-        return {
-          name: m.name,
-          slug: m.slug,
-          creator: m.modelCreatorName ?? m.modelCreatorSlug ?? null,
-          intelligenceIndex: m.intelligenceIndex,
-          codingIndex: m.codingIndex ?? null,
-          agenticIndex: m.agenticIndex ?? null,
-          medianOutputTokensPerSecond: m.medianOutputTokensPerSecond ?? null,
-          medianTimeToFirstTokenSeconds: m.medianTimeToFirstTokenSeconds ?? null,
-          blendedUsdPer1M: m.price1mBlended3To1 ?? null,
-          inputUsdPer1M: m.price1mInputTokens ?? null,
-          outputUsdPer1M: m.price1mOutputTokens ?? null,
-          contextWindow: m.contextWindowTokens ?? null,
-          releaseDate: m.releaseDate ?? null,
-          openrouterApiId: m.openrouterApiId ?? null,
-          isOpenWeights: m.isOpenWeights ?? null,
-        };
-      });
-    }
-
-    // ----- NVIDIA page RSC -> { allIds, freeIds } -----
-    // allIds  = Set of "{publisher}/{name}" for all NIM ENDPOINT objects in page RSC
-    // freeIds = subset with nim_type_preview label (= "Free Endpoint")
-    function parseNVIDIAPage(html) {
-      const pushRe = /self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)/g;
-      const chunks = [];
-      for (const m of html.matchAll(pushRe)) chunks.push(m[1]);
-      if (!chunks.length) return { allIds: new Set(), freeIds: new Set() };
-
-      const raw = chunks.join('');
-      let unescaped;
-      try { unescaped = JSON.parse('"' + raw.replace(/\\\$/g, '$') + '"'); }
-      catch { return { allIds: new Set(), freeIds: new Set() }; }
-
-      const allIds = new Set();
-      const freeIds = new Set();
-      const seenKeys = new Set();
-
-      for (let i = 0; i < unescaped.length - 20; i++) {
-        if (unescaped[i] !== '{') continue;
-        // Quick pre-check to avoid heavy matchBrace on every {
-        const peek = unescaped.slice(i, i + 60);
-        if (!peek.includes('"resourceType"')) continue;
-
-        const end = matchBrace(unescaped, i);
-        if (end < 0) continue;
-        const slice = unescaped.slice(i, end + 1);
-        if (!slice.includes('"ENDPOINT"')) continue;
-
-        const dedupKey = slice.slice(0, 80);
-        if (seenKeys.has(dedupKey)) continue;
-        seenKeys.add(dedupKey);
-
-        try {
-          const obj = JSON.parse(slice);
-          if (obj.resourceType !== 'ENDPOINT') continue;
-          const name = obj.name;
-          if (!name) continue;
-
-          // Extract publisher from labels
-          const labels = obj.labels || [];
-          let publisher = '';
-          let isFree = false;
-          for (const lbl of labels) {
-            if (lbl.key === 'publisher' && lbl.unresolvedValues?.length)
-              publisher = lbl.unresolvedValues[0];
-            if (lbl.key === 'nimType' && lbl.unresolvedValues?.includes('nim_type_preview'))
-              isFree = true;
-          }
-
-          const fullId = publisher ? `${publisher}/${name}` : name;
-          allIds.add(fullId);
-          allIds.add(name); // also index by name alone
-          if (isFree) {
-            freeIds.add(fullId);
-            freeIds.add(name);
-          }
-        } catch {}
-      }
-
-      return { allIds, freeIds };
-    }
-
-    // ----- main -----
     let rows = [];
 
-    const FRONTEND_PROXY = proxyUrl('/proxy/or-frontend') ||
+    // codetabs proxy for OR frontend (trains? column); degrades gracefully if down
+    const FRONTEND_PROXY =
       'https://api.codetabs.com/v1/proxy?quest=' +
       encodeURIComponent('https://openrouter.ai/api/frontend/models');
 
     let policyWarning = null;
 
     async function load() {
-      if (IS_FILE) {
-        setStatus('請啟動 server.py 後從 http://localhost:8080 開啟此頁面', true);
-        return;
-      }
-
       try {
-        setStatus('抓取資料中（AA ~3MB + OpenRouter + NVIDIA）…');
-        const [aaHtml, orData, frontendData, nvApiData, nvPageHtml] = await Promise.all([
-          fetch('/proxy/aa').then(r => {
-            if (!r.ok) throw new Error(`AA HTTP ${r.status}`);
-            return r.text();
+        setStatus('載入資料中…');
+
+        const [aaData, nvData, orData, frontendData] = await Promise.all([
+          // AA + NVIDIA: static JSON files in repo, no CORS needed
+          fetch('data/aa-models.json').then(r => {
+            if (!r.ok) throw new Error(`aa-models.json HTTP ${r.status}`);
+            return r.json();
           }),
+          fetch('data/nvidia-models.json').then(r => {
+            if (!r.ok) throw new Error(`nvidia-models.json HTTP ${r.status}`);
+            return r.json();
+          }),
+          // OpenRouter: has access-control-allow-origin: *, works everywhere
           fetch('https://openrouter.ai/api/v1/models').then(r => {
             if (!r.ok) throw new Error(`OR HTTP ${r.status}`);
             return r.json();
           }),
+          // OR frontend (trains? column): via codetabs proxy, optional
           fetch(FRONTEND_PROXY).then(r => {
             if (!r.ok) throw new Error(`proxy HTTP ${r.status}`);
             return r.json();
           }).catch(e => { policyWarning = e.message; return null; }),
-          fetch('/proxy/nvidia').then(r => {
-            if (!r.ok) throw new Error(`NVIDIA API HTTP ${r.status}`);
-            return r.json();
-          }).catch(() => null),
-          fetch('/proxy/nvidia-page').then(r => {
-            if (!r.ok) throw new Error(`NVIDIA page HTTP ${r.status}`);
-            return r.text();
-          }).catch(() => null),
         ]);
 
-        setStatus('解析資料中…');
+        setStatus('處理資料中…');
         await new Promise(r => setTimeout(r, 0));
 
-        rows = parseAA(aaHtml);
+        rows = aaData.models;
 
-        // ---- OpenRouter free models ----
+        // ── OpenRouter free ──
         const free = orData.data.filter(m => m.pricing?.prompt === '0' && m.pricing?.completion === '0');
         const expByOrId = new Map();
         for (const m of free) {
@@ -285,7 +137,6 @@
           expByOrId.set(m.id.replace(/:free$/, ''), m.expiration_date ?? null);
         }
 
-        // OR data_policy
         const policyByOrId = new Map();
         if (frontendData) {
           const arr = Array.isArray(frontendData) ? frontendData : (frontendData.data || []);
@@ -301,8 +152,9 @@
           }
         }
 
-        // OR Pass 1: exact match via openrouterApiId
         const freeIds = new Set(free.flatMap(m => [m.id, m.id.replace(/:free$/, '')]));
+
+        // OR Pass 1: exact match via openrouterApiId
         for (const r of rows) {
           r.isFreeOnOpenRouter =
             !!r.openrouterApiId &&
@@ -355,36 +207,20 @@
           }
         }
 
-        // ---- NVIDIA models ----
-        // nvApiIds: Set of all model IDs from NVIDIA NIM API  e.g. "meta/llama-3.1-70b-instruct"
-        // nvFreeIds: Set of IDs with Free Endpoint from build.nvidia.com page
-        const nvApiIds = new Set();
-        if (nvApiData?.data) {
-          for (const m of nvApiData.data) nvApiIds.add(m.id);
-        }
+        // ── NVIDIA ──
+        const nvApiIds = new Set(nvData.apiModels || []);
+        const nvFreeIds = new Set(nvData.freeIds || []);
 
-        let nvFreeIds = new Set();
-        let nvPageAllIds = new Set();
-        if (nvPageHtml) {
-          const { allIds, freeIds: f } = parseNVIDIAPage(nvPageHtml);
-          nvPageAllIds = allIds;
-          nvFreeIds = f;
-        }
-
-        // Match AA rows to NVIDIA
-        // Pass 1: direct ID match (NVIDIA "org/model" vs AA openrouterApiId normalised)
+        // Pass 1: match by model-name portion of NVIDIA ID vs OR ID
         for (const r of rows) {
           r.isOnNvidia = false;
           r.isNvidiaFree = false;
-
-          // Try matching via openrouterApiId — strip provider differences
+          r.nvidiaId = null;
           if (r.openrouterApiId) {
             const bareOr = r.openrouterApiId.replace(/:free$/, '');
-            // openrouter uses "meta-llama/llama..." nvidia uses "meta/llama..."
-            // Also try exact match
+            const orModel = bareOr.slice(bareOr.indexOf('/') + 1);
             for (const nvId of nvApiIds) {
               const nvModel = nvId.slice(nvId.indexOf('/') + 1);
-              const orModel = bareOr.slice(bareOr.indexOf('/') + 1);
               if (nvModel === orModel || nvId === bareOr) {
                 r.isOnNvidia = true;
                 r.nvidiaId = nvId;
@@ -394,25 +230,25 @@
           }
         }
 
-        // Pass 2: fuzzy match by creator + slug for remaining unmatched rows
+        // Pass 2: fuzzy match by creator + slug
         for (const nvId of nvApiIds) {
           const slash = nvId.indexOf('/');
           if (slash < 0) continue;
           const nvOrgLow = nvId.slice(0, slash).toLowerCase();
           const nvModelLow = nvId.slice(slash + 1).toLowerCase();
-
           for (const r of rows) {
             if (r.isOnNvidia) continue;
             const creLow = (r.creator || '').toLowerCase().replace(/[\s\-]/g, '');
             if (!creLow) continue;
-            // org matching: e.g. creLow="mistral" nvOrgLow="mistralai"
-            const orgMatch = creLow.includes(nvOrgLow) || nvOrgLow.includes(creLow) ||
-              nvOrgLow.replace(/ai$/, '') === creLow || creLow.replace(/ai$/, '') === nvOrgLow;
+            const orgMatch =
+              creLow.includes(nvOrgLow) || nvOrgLow.includes(creLow) ||
+              nvOrgLow.replace(/ai$/, '') === creLow ||
+              creLow.replace(/ai$/, '') === nvOrgLow;
             if (!orgMatch) continue;
             const slugLow = (r.slug || '').toLowerCase().replace(/[\.\-]/g, '');
             const nvModelNorm = nvModelLow.replace(/[\.\-]/g, '');
-            if (nvModelNorm.includes(slugLow) || slugLow.includes(nvModelNorm) ||
-                nvModelNorm.length > 6 && slugLow.includes(nvModelNorm.slice(0, nvModelNorm.length - 2))) {
+            if (slugLow.length > 4 &&
+                (nvModelNorm.includes(slugLow) || slugLow.includes(nvModelNorm))) {
               r.isOnNvidia = true;
               r.nvidiaId = nvId;
               break;
@@ -420,19 +256,21 @@
           }
         }
 
-        // Mark NVIDIA free: check nvidiaId against nvFreeIds + nvPageAllIds
+        // Mark NVIDIA free
         for (const r of rows) {
-          if (!r.isOnNvidia || !r.nvidiaId) continue;
+          if (!r.nvidiaId) continue;
           const nvModel = r.nvidiaId.slice(r.nvidiaId.indexOf('/') + 1);
           r.isNvidiaFree = nvFreeIds.has(r.nvidiaId) || nvFreeIds.has(nvModel);
         }
 
         rows.sort((a, b) => (b.intelligenceIndex ?? -1) - (a.intelligenceIndex ?? -1));
 
-        $('built').textContent = new Date().toLocaleString();
+        $('built').textContent = aaData.fetchedAt
+          ? new Date(aaData.fetchedAt).toLocaleString() + ' (AA)'
+          : new Date().toLocaleString();
         if (policyWarning) {
           $('built').insertAdjacentHTML('afterend',
-            ` · <span style="color:#d8a93a">⚠ Trains? 欄載入失敗（${escape(policyWarning)}）</span>`);
+            ` · <span style="color:#d8a93a">⚠ Trains? 欄載入失敗</span>`);
         }
         hideStatus();
         $('controls').hidden = false;
@@ -466,7 +304,7 @@
     let sortDir = 'desc';
 
     function render() {
-      const q = $('q').value.trim().toLowerCase();
+      const q         = $('q').value.trim().toLowerCase();
       const onlyFree   = $('onlyFree').checked;
       const onlyOR     = $('onlyOR').checked;
       const onlyNV     = $('onlyNV').checked;
@@ -494,7 +332,6 @@
       });
 
       $('tbody').innerHTML = filtered.map((r, i) => {
-        // Badges
         const orFreeBadge = r.isFreeOnOpenRouter
           ? '<span class="badge" style="background:#3f2d0a;color:#f0c674" title="Free on OpenRouter">OR free</span>' : '';
         const orBadge = r.openrouterApiId && !r.isFreeOnOpenRouter
@@ -506,7 +343,6 @@
         const openBadge = r.isOpenWeights
           ? '<span class="badge" style="background:#1a3f5f;color:#7fb8e6">open</span>' : '';
 
-        // Model name link
         let nameHtml;
         if (r.openrouterApiId) {
           const bare = r.openrouterApiId.replace(/:free$/, '');
